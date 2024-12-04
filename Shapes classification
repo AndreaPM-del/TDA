@@ -61,6 +61,9 @@ def normalize_pc(points):
 	furthest_distance = np.max(np.sqrt(np.sum(abs(points)**2,axis=-1)))
 	points /= furthest_distance
 
+	return points
+
+
 
 #Functions for k-nn algorithm
 
@@ -365,21 +368,3 @@ cm = confusion_matrix(Y_test_listbis[accuracyV.index(np.max(accuracyV))], Y_pred
 disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=Y_train[accuracyV.index(np.max(accuracyV))])
 disp.plot()
 plt.show()
-
-
-
-
-
-
-
-
-
-
-
-
-
-	return points
-
-
-
-
