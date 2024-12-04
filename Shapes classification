@@ -1,0 +1,385 @@
+import trimesh
+import numpy as np
+import gudhi as gd
+import pickle
+import heapq
+import sklearn
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import ConfusionMatrixDisplay
+
+
+FUNCTIONS
+
+#Load object file and extract the vertices and faces
+
+def load_obj_file(file_path):
+
+    mesh = trimesh.load(file_path)
+    
+    vertices = mesh.vertices
+    faces = mesh.faces
+    
+    return vertices, faces
+
+
+#Farthest point sampling algorithm
+
+def farthest_point_sampling(points, num_samples):
+    
+    N, D = points.shape
+    sampled_indices = [np.random.randint(0, N)] 
+    distances = np.full(N, np.inf)
+    
+    for _ in range(1, num_samples):
+        # Last sampled point
+        last_sampled_point = points[sampled_indices[-1]]
+        
+        # Euclidean distance to the last sampled point
+        dist_to_last_sampled = np.linalg.norm(points - last_sampled_point, axis=1)
+        
+        # Update minimum distances
+        distances = np.minimum(distances, dist_to_last_sampled)
+        
+        # Select the farthest point
+        next_sampled_index = np.argmax(distances)
+        sampled_indices.append(next_sampled_index)
+    
+    # Get sampled points
+    sampled_points = points[sampled_indices]
+    
+    return sampled_points, sampled_indices
+
+
+
+#Normalize points 
+
+def normalize_pc(points):
+	centroid = np.mean(points, axis=0)
+	points -= centroid
+	furthest_distance = np.max(np.sqrt(np.sum(abs(points)**2,axis=-1)))
+	points /= furthest_distance
+
+
+#Functions for k-nn algorithm
+
+def bottleneck_distance(diagram1,diagram2,h):
+    distance = gd.bottleneck_distance(diagram1.persistence_intervals_in_dimension(h),diagram2.persistence_intervals_in_dimension(h))
+    return distance
+
+def find_neighbors(X_train, query_point, k):
+    distances = []
+    
+    # Distance from the query point to each point in the training set
+    for i, data_point in enumerate(X_train):
+        distance = max(bottleneck_distance(query_point, data_point,0),bottleneck_distance(query_point, data_point,1),bottleneck_distance(query_point, data_point,2))
+        distances.append((i, distance))
+    
+    # Sorting distances in ascending order
+    distances.sort(key=lambda x: x[1])
+    
+    # Indices of the 'k' nearest neighbors
+    neighbors = [index for index, _ in distances[:k]]
+    return neighbors
+
+def predict(X_train, y_train, query_point, k): 
+
+    neighbors = find_neighbors(X_train, query_point, k)
+    neighbor_labels = [y_train[i] for i in neighbors]
+    
+    # Count occurrences of each label among neighbors
+    label_counts = {}
+    for label in neighbor_labels:
+        if label in label_counts:
+            label_counts[label] += 1
+        else:
+            label_counts[label] = 1
+    
+    # Get the label with the highest count
+    predicted_class = max(label_counts, key=label_counts.get)
+    return predicted_class
+
+
+
+COMPUTATION OF PERSISTENCE DIAGRAMS
+
+
+#LOAD OBJECTS SAMPLED WITH EUCLIDIAN FPS
+
+objects = []
+y = []
+#n = 6
+animals = ['cat','elephant','face','head','horse']
+labels = ['cat','elephant','face','head','horse']
+#Abrir datos sampleados
+for animal in animals:
+    file_path = f'{animal}_sampled.bin'
+
+    with open(file_path, 'rb') as file:
+    # Deserialize and retrieve the variable from the file
+        temp = pickle.load(file)
+        objects = objects + temp
+        y = y + [f'{animal}']*len(temp)
+
+
+#POINT CLOUD AND NORMALIZATION OF THE DATA
+
+point_clouds = []
+
+for i in range (0,len(objects)):
+    point_clouds.append(trimesh.points.PointCloud(objects[i][0]))
+
+
+for i in range (0,len(objects)):
+    normalize_pc(objects[i][0])
+
+for i in range (0,len(objects)):
+    point_clouds[i] = trimesh.points.PointCloud(objects[i][0])
+
+
+#PERSISTENCE DIAGRAMS 
+
+VR = []
+STX = []
+diagX = []
+for i in range (0,len(objects)):
+    VR.append(gd.RipsComplex(points=point_clouds[i],sparse=True))
+    STX.append(VR[i].create_simplex_tree(max_dimension=2))
+    STX[i].collapse_edges(nb_iterations=3)
+    STX[i].expansion(3)
+    diagX.append(STX[i].persistence())
+
+
+PREDICTIONS OF THE MODEL
+
+
+#DICTIONARY OF LABELS
+
+import random
+from collections import defaultdict
+
+labels = y
+
+grouped = defaultdict(list)
+
+for idx, label in enumerate(labels):
+    grouped[label].append(idx)
+
+
+#PICKING A RANDOM REPRESENTANT FOR EACH CLASS (1000 TIMES)
+
+
+random_indices = []
+X_test_list = []
+Y_test_list = []
+X_train = []
+Y_train = []
+
+for i in range(1000):
+    # Picking a random index for each label
+    random_indices.append({label: random.choice(indices) for label, indices in grouped.items()})
+
+    X_train.append([STX[random_indices[i]['cat']],STX[random_indices[i]['elephant']],STX[random_indices[i]['face']],STX[random_indices[i]['head']],STX[random_indices[i]['horse']]])
+    Y_train.append([y[random_indices[i]['cat']],y[random_indices[i]['elephant']],y[random_indices[i]['face']],y[random_indices[i]['head']],y[random_indices[i]['horse']]])
+    
+    X_test = STX.copy()
+    Y_test = y.copy()
+
+    
+
+    # Indices to delete
+    indices_to_delete = [random_indices[i]['cat'],random_indices[i]['elephant'],random_indices[i]['face'],random_indices[i]['head'],random_indices[i]['horse']]
+
+    # Deleting elements starting from the highest index
+    for index in sorted(indices_to_delete, reverse=True):
+        X_test.pop(index)
+        Y_test.pop(index)
+        
+    X_test_list.append(X_test)
+    Y_test_list.append(Y_test)
+
+
+#PREDICTIONS OF THE MODEL (1000 TIMES) WE USE MULTIPROCESSING LIBRARY TO PARALLELIZE THE COMPUTATIONS
+
+import multiprocessing
+
+def predict_for_j(j):
+    Y_pred_test = []
+    for i in range(len(Y_test_list[j])):
+        Y_pred_test.append(predict(X_train[j], Y_train[j], X_test_list[j][i], 1))
+    return Y_pred_test
+
+def parallel_prediction():
+    # 8 cores
+    with multiprocessing.Pool(processes=8) as pool:
+        Y_pred_list = pool.map(predict_for_j, range(len(X_test_list)))
+    return Y_pred_list
+
+Y_pred_list = parallel_prediction()
+
+
+#ACCURACY
+
+accuracy = []
+for i in range(len(Y_pred_list)):
+    accuracy.append(accuracy_score(Y_test_list[i], Y_pred_list[i]))
+
+np.max(accuracy)
+
+np.mean(accuracy)
+
+np.min(accuracy)
+
+accuracy.index(np.max(accuracy))
+
+cm = confusion_matrix(Y_test_list[accuracy.index(np.max(accuracy))], Y_pred_list[accuracy.index(np.max(accuracy))])
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=Y_train[accuracy.index(np.max(accuracy))])
+disp.plot()
+plt.show()
+
+
+
+
+SAME PROCESS CONSIDERING P-ECCENTRICITY AND VORONOI MEASURE
+
+
+#Distance matrices
+from scipy.spatial.distance import cdist
+dist = []
+for i in range (0,len(objects)):
+    temp = cdist(point_clouds[i].vertices, point_clouds[i].vertices)
+    dist.append(temp)
+
+
+#Set all distances to infinity
+dist_vor = np.copy(dist)
+for i in range (0,len(dist)):
+    for j in range (0,len(dist[i])):
+        dist_vor[i][j,j]=np.inf
+
+
+#Voronoi weights
+w_voronoi = [] 
+for k in range (0,len(dist_vor)):
+    voronoi_temp = []
+    for i in range (0,len(dist_vor[k])):
+        cont = 0
+        for j in range (0,len(dist_vor[k])):
+            if dist_vor[k][i,j] <= np.min(dist_vor[k][j]):
+                cont+=1
+        voronoi_temp.append(cont)
+    w_voronoi.append(voronoi_temp)
+
+
+for i in range (0,len(w_voronoi)):
+    w_voronoi[i] = [j+1 for j in w_voronoi[i]]
+    w_voronoi[i] = [j/len(w_voronoi[i]) for j in w_voronoi[i]]
+
+
+#P-ECCENTRICITY FORMULA
+
+p = 2
+lamb = 0.1
+
+for i in range (0,len(dist)):
+    dist[i] = dist[i]**p
+
+s = []
+for i in range (0,len(dist)):
+    s.append(dist[i].dot(np.array(w_voronoi[i])))
+
+for i in range (0,len(s)):
+    s[i] = (s[i]**(1/p))*lamb
+
+#New simplices 
+
+simplices = []
+for i in range (0,len(STX)):
+    simplices.append(list(STX[i].get_filtration()))
+
+STXV = STX.copy()
+for k in range (0,len(STX)):
+    for i in range(len(simplices[k])):
+        p_excen=[s[k][j] for j in simplices[k][i][0]]
+        fil_val=[simplices[k][i][1]]
+        r=np.max(p_excen+fil_val)
+        STXV[k].assign_filtration(simplices[k][i][0],r)
+
+#TRAIN-TEST SETS (1000 TIMES)
+
+X_test_listV = []
+Y_test_listV = []
+X_trainV = []
+Y_trainV = []
+
+for i in range(1000):
+
+    X_trainV.append(STXV[random_indices[i]['cat']],STXV[random_indices[i]['elephant']],STXV[random_indices[i]['face']],STXV[random_indices[i]['head']],STXV[random_indices[i]['horse']]])
+    Y_trainV.append(y[random_indices[i]['cat']],y[random_indices[i]['elephant']],y[random_indices[i]['face']],y[random_indices[i]['head']],y[random_indices[i]['horse']]])
+    
+    X_test = STXV.copy()
+    Y_test = y.copy()
+
+    
+
+    # Indices to delete
+    indices_to_delete = [random_indices[i]['cat'],random_indices[i]['elephant'],random_indices[i]['face'],random_indices[i]['head'],random_indices[i]['horse']]
+
+    # Deleting elements starting from the highest index
+    for index in sorted(indices_to_delete, reverse=True):
+        X_test.pop(index)
+        Y_test.pop(index)
+        
+    X_test_listV.append(X_test)
+    Y_test_listV.append(Y_test)
+
+#PREDICTIONS OF THE MODEL (1000 TIMES)
+
+def predict_for_j(j):
+    Y_pred_test = []
+    for i in range(len(Y_test_listV[j])):
+        Y_pred_test.append(predict(X_trainV[j], Y_trainV[j], X_test_listV[j][i], 1))
+    return Y_pred_test
+
+def parallel_prediction():
+    with multiprocessing.Pool(processes=8) as pool:
+        Y_pred_listV = pool.map(predict_for_j, range(len(X_test_listV)))
+    return Y_pred_listV
+
+Y_pred_listV = parallel_prediction()
+
+#ACCURACY 
+
+accuracyV = []
+for i in range(len(Y_pred_listV)):
+    accuracyV.append(accuracy_score(Y_test_listV[i], Y_pred_listV[i]))
+
+np.max(accuracyV)
+
+np.mean(accuracyV)
+
+np.min(accuracyV)
+
+cm = confusion_matrix(Y_test_listbis[accuracyV.index(np.max(accuracyV))], Y_pred_listbis[accuracyV.index(np.max(accuracyV))])
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=Y_train[accuracyV.index(np.max(accuracyV))])
+disp.plot()
+plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+	return points
+
+
+
+
