@@ -1,4 +1,4 @@
-Algorithm for shape classification using Topological Data Analysis tools. 
+Algorithm for shape classification using Topological Data Analysis tools ('Shapes classification' document)
 
 Open source dataset: https://people.csail.mit.edu/sumner/research/deftransfer/data.html 
 
